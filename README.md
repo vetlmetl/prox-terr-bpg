@@ -45,7 +45,7 @@ its job ends. Anything running *inside* the cluster arrives one of two ways.
 First, a handful of core manifests are fetched by Talos at boot through
 `cluster.extraManifests`: Argo CD itself, metrics-server, Longhorn, and the NFS
 CSI driver. I keep them as pinned YAML in my separate GitOps repo,
-[`gitops-k8s`](https://gitlab.com/vetlmetl/gitops-k8s), and just point Terraform
+[`gitops-k8s`](https://gitlab.com/ci-cd-vetlmetl/gitops-k8s), and just point Terraform
 at their raw URLs with `extra_manifest_urls`. I moved these out of the machine
 config deliberately — inlining Longhorn alone dumped ~5k lines into every plan
 and into state.
