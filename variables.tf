@@ -181,6 +181,24 @@ variable "nfs_share" {
   }
 }
 
+# ─── Cluster manifests (Talos extraManifests) ──────────────────────────────
+# Raw URLs Talos fetches at cluster bootstrap via cluster.extraManifests (see
+# extra_manifests.tf): Argo CD (the GitOps engine) + the app-of-apps root, plus
+# the cluster add-ons (metrics-server, Longhorn, csi-driver-nfs). Hosting these
+# by URL instead of vendoring them inline keeps the machine config / plan clean.
+# All live in the GitOps repo under bootstrap/. Empty = a bare cluster.
+
+variable "extra_manifest_urls" {
+  description = "Raw https URLs Talos fetches at bootstrap (cluster.extraManifests): Argo CD + root app + cluster add-ons (metrics-server, Longhorn, csi-driver-nfs), all hosted under bootstrap/ in the GitOps repo. Empty installs none."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for u in var.extra_manifest_urls : can(regex("^https://", u))])
+    error_message = "Each extra manifest URL must be an https:// URL."
+  }
+}
+
 # ─── Proxmox connection variables ─────────────────────────────────────────
 
 variable "proxmox_endpoint" {

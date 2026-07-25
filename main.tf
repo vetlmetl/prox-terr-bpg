@@ -84,13 +84,14 @@ module "talos" {
   # node's primary IP from the guest agent (the VIP above is excluded).
   node_ipv4_cidr = local.node_ipv4_cidr
 
-  # Control-plane patches: network/VIP (cluster_network.tf), metrics-server
-  # (metrics_server.tf), and the storage add-on inlineManifests (storage.tf).
-  # Talos merges the list in order.
+  # Control-plane patches: network/VIP (cluster_network.tf), the generated `nfs`
+  # StorageClass inlineManifest (storage.tf), and the URL-fetched cluster
+  # manifests — Argo CD + metrics-server/Longhorn/csi-driver-nfs — via
+  # cluster.extraManifests (extra_manifests.tf). Talos merges the list in order.
   control_machine_config_patches = concat(
     local.control_shared_patches,
-    local.cluster_addon_patches,
     local.storage_addon_patches,
+    local.extra_manifest_patches,
   )
 
   # Worker patches: install disk + the /var/lib/longhorn kubelet mount Longhorn

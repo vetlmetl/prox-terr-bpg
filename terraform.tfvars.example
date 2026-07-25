@@ -55,6 +55,21 @@ iso_datastore     = "local"
 nfs_server = "192.168.1.10"
 nfs_share  = "/mnt/pool/k8s"
 
+# ─── Cluster manifests (Talos extraManifests) ──────────────────────────────
+# Raw URLs Talos fetches at bootstrap (see extra_manifests.tf): Argo CD + the
+# app-of-apps root, plus the cluster add-ons (metrics-server, Longhorn,
+# csi-driver-nfs) — hosted under bootstrap/ in your GitOps repo instead of
+# vendored inline, to keep the machine config / plan clean. Leave unset (empty)
+# for a bare cluster. On an already-running cluster, also `kubectl apply -f
+# <url>` once — Talos only fetches extraManifests at bootstrap.
+# extra_manifest_urls = [
+#   "https://gitlab.com/YOUR_NAMESPACE/YOUR_GITOPS_REPO/-/raw/main/bootstrap/metrics-server.yaml",
+#   "https://gitlab.com/YOUR_NAMESPACE/YOUR_GITOPS_REPO/-/raw/main/bootstrap/csi-driver-nfs.yaml",
+#   "https://gitlab.com/YOUR_NAMESPACE/YOUR_GITOPS_REPO/-/raw/main/bootstrap/longhorn.yaml",
+#   "https://gitlab.com/YOUR_NAMESPACE/YOUR_GITOPS_REPO/-/raw/main/bootstrap/argocd.yaml",
+#   "https://gitlab.com/YOUR_NAMESPACE/YOUR_GITOPS_REPO/-/raw/main/bootstrap/root-app.yaml",
+# ]
+
 # ─── Proxmox connection ───────────────────────────────────────────────────
 
 # Use the host IP on the native API port (:8006), not a reverse-proxied DNS

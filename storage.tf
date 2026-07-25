@@ -6,10 +6,13 @@
 #   - csi-driver-nfs -> `nfs` StorageClass: big-capacity RWX/bulk on the 2 TB
 #     NFS share. No image extension needed (in-kernel NFS client).
 #
-# Both drivers are vendored, pinned manifests under manifests/ and applied as
-# Talos cluster inlineManifests (same pattern as metrics_server.tf). The
-# env-specific NFS StorageClass is generated here so server/share come from
-# variables rather than a vendored file.
+# The Longhorn and csi-driver-nfs *driver* manifests are fetched by Talos as
+# extraManifests from the GitOps repo (see extra_manifests.tf) rather than
+# vendored inline, to keep the machine config / plan clean. What remains here:
+#   1. The `nfs` StorageClass — generated so server/share come from variables,
+#      so it stays a (tiny) inlineManifest rather than a static URL.
+#   2. The worker kubelet /var/lib/longhorn bind mount — machine config, not a
+#      k8s manifest, so it cannot move to extraManifests.
 
 locals {
   # Worker machine config. Overriding worker_machine_config_patches REPLACES the
@@ -32,23 +35,17 @@ locals {
     })
   ]
 
-  # Cluster-level storage add-ons, concat'd onto the control-plane patches in
-  # main.tf. inlineManifests are cluster-scoped, so they live on control nodes.
+  # The env-specific `nfs` StorageClass for csi-driver-nfs, concat'd onto the
+  # control-plane patches in main.tf. Parameterized by the NFS export, so it is
+  # generated here rather than fetched as a static extraManifest. The driver
+  # itself (provisioner nfs.csi.k8s.io) is an extraManifest (extra_manifests.tf);
+  # this class just won't provision until that driver is up (both at bootstrap).
   storage_addon_patches = [
     yamlencode({
       cluster = {
         inlineManifests = [
           {
-            name     = "longhorn"
-            contents = file("${path.module}/manifests/longhorn.yaml")
-          },
-          {
-            name     = "csi-driver-nfs"
-            contents = file("${path.module}/manifests/csi-driver-nfs.yaml")
-          },
-          {
-            # `nfs` StorageClass for csi-driver-nfs, parameterized by the NFS
-            # export. Not marked default — Longhorn is the default class.
+            # Not marked default — Longhorn is the default class.
             name = "csi-driver-nfs-storageclass"
             contents = yamlencode({
               apiVersion  = "storage.k8s.io/v1"

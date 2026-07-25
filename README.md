@@ -1,38 +1,26 @@
-# Kubernetes based on Talos on Proxmox via terraform 
+# Talos Kubernetes on Proxmox
 
-Terraform configuration that provisions a highly available [Talos
-Linux](https://www.talos.dev/) Kubernetes cluster on Proxmox VE, built on the
-[`bpg/proxmox`](https://registry.terraform.io/providers/bpg/proxmox) and
-[`siderolabs/talos`](https://registry.terraform.io/providers/siderolabs/talos)
-providers.
+This is the Terraform I use to build my home-lab Kubernetes cluster: [Talos
+Linux](https://www.talos.dev/) on Proxmox VE, six VMs, highly available. The
+Proxmox host sits behind my router (which has a public IP), and I use the cluster
+to run small projects and expose a few of them to the internet.
 
-The cluster runs in a home lab: Proxmox sits behind a firewall/router with a
-public IP, and the cluster is intended to host and expose small projects to the
-internet.
+It leans on the [`bpg/proxmox`](https://registry.terraform.io/providers/bpg/proxmox)
+and [`siderolabs/talos`](https://registry.terraform.io/providers/siderolabs/talos)
+providers, and calls my own fork of the `bbtechsys/talos/proxmox` module.
 
-## Architecture
+## What it builds
 
-- **3 control plane + 3 worker** VMs (etcd quorum, HA control plane).
-- **HA API endpoint via a shared Talos VIP** (`192.168.88.200`). The Kubernetes
-  API is reached through the floating VIP, not a single node, so losing the VIP
-  holder does not take down API access.
-- **Predictable node IPs** via fixed MAC addresses + router DHCP reservations.
-  Nodes stay on DHCP (which keeps the module's guest-agent IP discovery stable);
-  the reservations pin each MAC to a fixed address.
-- **Persistent storage** — two CSI layers, deployed as Talos inlineManifests:
-  [Longhorn](https://longhorn.io/) (default `longhorn` StorageClass, replicated
-  RWO block on the worker SSDs) and
-  [csi-driver-nfs](https://github.com/kubernetes-csi/csi-driver-nfs) (`nfs`
-  StorageClass, RWX/bulk on an NFS share). See [Storage](#storage).
-- **Remote state** on an S3-compatible object store with native locking and
-  encryption.
-- **Forked module** — the cluster consumes a personal fork of
-  [`bbtechsys/talos/proxmox`](https://registry.terraform.io/modules/bbtechsys/talos/proxmox),
-  [`vetlmetl/terraform-proxmox-talos`](https://github.com/vetlmetl/terraform-proxmox-talos),
-  pinned by release tag. It adds a required `cluster_endpoint` (the change that
-  enables the VIP). See [Module fork](#module-fork).
+Three control-plane nodes and three workers, so etcd keeps quorum and the control
+plane survives a node dropping out. I reach the Kubernetes API through a shared
+Talos VIP (`192.168.88.200`) instead of any single node, so when the VM holding
+the VIP goes away the address just moves and `kubectl` keeps working.
 
-### Network layout
+Node IPs are predictable: every VM has a fixed MAC and my router hands out the
+matching address as a DHCP reservation. I keep the nodes on DHCP on purpose.
+Talos' static-IP config fights the module's guest-agent IP discovery, and once
+stranded a node on me during a test, so reservations turned out to be the calmer
+path.
 
 | Role      | VM name        | IP               | MAC                 |
 | --------- | -------------- | ---------------- | ------------------- |
@@ -44,140 +32,125 @@ internet.
 | worker-1  | test-worker-1  | `192.168.88.205` | `bc:24:11:88:02:05` |
 | worker-2  | test-worker-2  | `192.168.88.206` | `bc:24:11:88:02:06` |
 
-VM names are the keys of `control_nodes` / `worker_nodes` in `terraform.tfvars`;
-Talos assigns its own node hostnames. Gateway `192.168.88.1`, DNS
-`192.168.88.101`. Adjust in `cluster_network.tf`.
+The VM names are the keys of `control_nodes` / `worker_nodes` in
+`terraform.tfvars`; Talos picks its own node hostnames. My gateway is
+`192.168.88.1` and DNS is `192.168.88.101`. All of this lives in
+`cluster_network.tf`.
 
-## Repository layout
+## How things get into the cluster
 
-| File                 | Purpose                                                                 |
-| -------------------- | ----------------------------------------------------------------------- |
-| `main.tf`            | Providers, S3 backend, and the Talos module call.                       |
-| `variables.tf`       | Input variables with validation.                                        |
-| `cluster_network.tf` | VIP, node MAC/IP maps, and the Talos config patches (DNS, VIP, certSANs).|
-| `storage.tf`         | Worker `/var/lib/longhorn` mount and the Longhorn + NFS CSI manifests.   |
-| `metrics_server.tf`  | metrics-server inlineManifest (for `kubectl top`).                       |
-| `manifests/`         | Vendored, pinned add-on manifests applied as Talos inlineManifests.      |
-| `terraform.tfvars`   | Environment-specific values. **Gitignored** (see below).                |
-| `backend.hcl`        | Partial backend config (bucket name). **Gitignored.**                   |
-| `backend.hcl.example`| Template for `backend.hcl`.                                             |
+Terraform builds the VMs and the Talos machine config, and that's roughly where
+its job ends. Anything running *inside* the cluster arrives one of two ways.
 
-`terraform.tfvars`, `backend.hcl`, all `*.tfstate`, and `.terraform/` are
-gitignored — they hold secrets or infrastructure detail.
+First, a handful of core manifests are fetched by Talos at boot through
+`cluster.extraManifests`: Argo CD itself, metrics-server, Longhorn, and the NFS
+CSI driver. I keep them as pinned YAML in my separate GitOps repo,
+[`gitops-k8s`](https://gitlab.com/vetlmetl/gitops-k8s), and just point Terraform
+at their raw URLs with `extra_manifest_urls`. I moved these out of the machine
+config deliberately — inlining Longhorn alone dumped ~5k lines into every plan
+and into state.
 
-## Prerequisites
+Second, once Argo CD is up it takes over. An app-of-apps reconciles the `apps/`
+folder in the GitOps repo, which today is sealed-secrets and a GitLab CI runner.
+So the cluster's actual workloads are GitOps, not Terraform, and I add new ones by
+committing to that repo rather than touching this one.
 
-- Terraform **>= 1.10** (the S3 backend uses `use_lockfile`).
-- A Proxmox VE cluster reachable over the API, plus an API token.
-- An S3-compatible bucket for remote state (e.g. MinIO, Garage, Backblaze).
-- `talosctl` and `kubectl` for operating the cluster.
-- DHCP server configured with the reservations below.
-- An NFS server for the `nfs` StorageClass, exporting a share to the node subnet
-  with `rw,no_root_squash` (see [Storage](#storage)).
-
-### DHCP
-
-Before `terraform apply`:
-
-- Exclude `192.168.88.200–.220` from the DHCP dynamic pool.
-- Add static mappings for each MAC in the [network table](#network-layout)
-  (`bc:24:11:88:02:01` → `192.168.88.201`, etc.).
-- Leave `192.168.88.200` unmapped — Talos manages it as the VIP.
-
-## Configuration
-
-### Secrets / environment variables
-
-The Proxmox API token is **not** stored in `terraform.tfvars` (a `tfvars` value
-would override the environment). Provide it via the environment:
-
-```bash
-export TF_VAR_proxmox_api_token='terraform@pam!provision=<uuid>'
-```
-
-S3 backend credentials (read by the backend at init time):
-
-```bash
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-export AWS_DEFAULT_REGION=...
-export AWS_ENDPOINT_URL_S3=...   # your S3-compatible endpoint
-```
-
-### Backend
-
-```bash
-cp backend.hcl.example backend.hcl   # then set: bucket = "<your-bucket>"
-```
-
-### Variables
-
-Set cluster/connection values in `terraform.tfvars` (cluster name, Talos
-version, `talos_schematic_id`, node maps, disk sizes, datastores, Proxmox
-endpoint, SSH details, and the `nfs_server` / `nfs_share` for the `nfs`
-StorageClass). See `variables.tf` for the full list and validation rules.
-
-## Usage
-
-```bash
-terraform init -backend-config=backend.hcl
-terraform plan
-terraform apply
-```
-
-### Accessing the cluster
-
-```bash
-terraform output -raw kubeconfig  > kubeconfig
-terraform output -raw talos_config > talosconfig
-
-kubectl --kubeconfig kubeconfig get nodes -o wide
-talosctl --talosconfig talosconfig -e 192.168.88.200 -n 192.168.88.200 etcd members
-```
-
-Both outputs are marked sensitive and point at the VIP (`192.168.88.200`).
-
-### Verifying HA
-
-Power off whichever control node currently holds the VIP; `kubectl` should keep
-working within seconds as the VIP migrates to another control node.
+The only manifest Terraform still generates inline is the `nfs` StorageClass,
+because its server and share come from my tfvars.
 
 ## Storage
 
-Two CSI layers are provisioned as Talos cluster inlineManifests (vendored, pinned
-under `manifests/`, wired up in `storage.tf`):
+Two CSI layers:
 
-| StorageClass         | Driver           | Backing            | Modes | Use                                   |
-| -------------------- | ---------------- | ------------------ | ----- | ------------------------------------- |
-| `longhorn` (default) | Longhorn         | worker SSDs (×2 replicas) | RWO   | Fast, replicated block for app state. |
-| `nfs`                | csi-driver-nfs   | external NFS share | RWX   | Bulk / shared volumes, backup targets. |
+| StorageClass         | Driver         | Backing                   | Modes | Use                                   |
+| -------------------- | -------------- | ------------------------- | ----- | ------------------------------------- |
+| `longhorn` (default) | Longhorn       | worker SSDs (×2 replicas) | RWO   | Fast, replicated block for app state. |
+| `nfs`                | csi-driver-nfs | external NFS share        | RWX   | Bulk / shared volumes, backup targets. |
 
-**Longhorn** requires the `iscsi-tools` + `util-linux-tools` Talos extensions,
-baked into the image via `talos_schematic_id`, and a `/var/lib/longhorn` kubelet
-bind mount on workers (`worker_machine_config_patches`). Both are set for you in
-`storage.tf` / `terraform.tfvars`.
+Longhorn needs the `iscsi-tools` and `util-linux-tools` Talos extensions baked
+into the image (via `talos_schematic_id`) and a `/var/lib/longhorn` kubelet bind
+mount on the workers. Both are already set — the mount in `storage.tf`, the
+schematic in `terraform.tfvars`.
 
-**NFS** is environment-specific — set `nfs_server` and `nfs_share` in
-`terraform.tfvars`. The export must permit the node subnet with `rw` and
-`no_root_squash` (the provisioner creates per-volume subdirectories as root),
-e.g. in the server's `/etc/exports`:
+NFS is environment-specific, so I set `nfs_server` and `nfs_share` in
+`terraform.tfvars`. The export has to allow the node subnet with `rw` and
+`no_root_squash` (the provisioner makes per-volume subdirectories as root), e.g.:
 
 ```
 /srv/k8s  192.168.88.200/28(rw,sync,no_subtree_check,no_root_squash)
 ```
 
-The `nfs` StorageClass sets `mountPermissions: "0777"` so non-root pods can write
-(NFS ignores `fsGroup`).
+The `nfs` StorageClass sets `mountPermissions: "0777"` so non-root pods can write,
+since NFS ignores `fsGroup`.
 
-## Rebuilding the cluster
+## What's in here
 
-A change that recreates **all** VMs at once — a new `talos_schematic_id`, a Talos
-image change, or a `terraform destroy` — must be applied in **two steps**, or the
-Talos provider aborts with an inconsistent-plan error and the fresh cluster is
-left unbootstrapped:
+- `main.tf` — providers, S3 backend, and the module call.
+- `variables.tf` — input variables and their validation.
+- `cluster_network.tf` — the VIP, the MAC/IP maps, and the Talos config patches.
+- `storage.tf` — the worker Longhorn mount and the generated `nfs` StorageClass.
+- `extra_manifests.tf` — the `cluster.extraManifests` list (`extra_manifest_urls`).
+- `backend.hcl.example` — template for the backend config.
+
+`terraform.tfvars`, `backend.hcl`, every `*.tfstate`, and `.terraform/` are
+gitignored, because they hold secrets or details of my network.
+
+## Before you apply
+
+- Terraform 1.10 or newer (the S3 backend uses `use_lockfile`).
+- A Proxmox VE cluster reachable over the API, plus an API token.
+- An S3-compatible bucket for state (I've used MinIO and Garage).
+- `talosctl` and `kubectl`.
+- DHCP reservations for the MACs above, with `192.168.88.200–.220` kept out of the
+  dynamic pool and `.200` left unmapped for the VIP.
+- An NFS server exporting a share to the node subnet, if you want the `nfs` class.
+
+The Proxmox API token does not go in `terraform.tfvars` (a tfvars value would
+shadow the environment). I pass it through the environment instead:
 
 ```bash
-# 1. Create the VMs first, so node IPs are known before the config step.
+export TF_VAR_proxmox_api_token='terraform@pam!provision=<uuid>'
+```
+
+The S3 backend reads its credentials from the environment at init time:
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_DEFAULT_REGION=...
+export AWS_ENDPOINT_URL_S3=...
+```
+
+## Running it
+
+```bash
+cp backend.hcl.example backend.hcl     # set bucket = "<your-bucket>"
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+```
+
+To talk to the cluster afterwards:
+
+```bash
+terraform output -raw kubeconfig  > kubeconfig
+terraform output -raw talos_config > talosconfig
+kubectl --kubeconfig kubeconfig get nodes -o wide
+```
+
+Both outputs are sensitive and point at the VIP. To check the HA actually works,
+power off whichever control node currently holds `192.168.88.200` — `kubectl`
+should recover within a few seconds as the VIP moves.
+
+## Rebuilding from scratch
+
+Anything that recreates every VM at once — a new `talos_schematic_id`, a Talos
+image change, or a `terraform destroy` — has to go in two steps. In one shot the
+Talos provider trips an inconsistent-plan error (node IPs aren't known at plan
+time), and the fresh cluster can be left unbootstrapped:
+
+```bash
+# 1. Create the VMs first, so their IPs are known before the config step.
 terraform apply \
   -target=module.talos.proxmox_virtual_environment_vm.talos_control_vm \
   -target=module.talos.proxmox_virtual_environment_vm.talos_worker_vm
@@ -185,31 +158,32 @@ terraform apply \
 # 2. Apply the rest (machine config, bootstrap, kubeconfig).
 terraform apply
 
-# 3. If the API never comes up (kubectl → connection refused on VIP:6443 for
-#    >5 min), the bootstrap resource went stale — force it:
+# 3. If the API never comes up (kubectl -> connection refused on VIP:6443 for
+#    more than ~5 min), the bootstrap resource went stale — force it:
 terraform apply \
   -replace='module.talos.talos_machine_bootstrap.talos_bootstrap' \
   -replace='module.talos.talos_cluster_kubeconfig.talos_kubeconfig'
 ```
 
-## Module fork
+On a fresh cluster Talos fetches the `extra_manifest_urls` for me, so Argo CD and
+the storage/metrics add-ons come back on their own.
 
-`main.tf` points `module "talos"` at a personal fork,
+## The module fork
+
+`main.tf` points `module "talos"` at my fork,
 [`vetlmetl/terraform-proxmox-talos`](https://github.com/vetlmetl/terraform-proxmox-talos),
-pinned by **release tag** in the `source` (`?ref=vX.Y.Z`) rather than the
-registry, because the cluster relies on a required `cluster_endpoint` (the VIP
-override) not present upstream. To adopt module changes: make them in the fork,
-cut a SemVer release tag, bump the `?ref=` in `main.tf`, and re-run
-`terraform init -upgrade`.
+pinned by release tag (`?ref=vX.Y.Z`) rather than the registry. I forked it
+because my setup needs a required `cluster_endpoint` — the VIP override — that
+isn't in the upstream module. To pull in a module change I make it in the fork,
+tag a SemVer release, bump the `?ref=` here, and run `terraform init -upgrade`.
 
-## Security notes
+## A note on security
 
-- Treat `terraform.tfstate`, `terraform.tfvars`, and `backend.hcl` as secrets;
-  they are gitignored.
-- Do not expose the Kubernetes API (`6443`) or Talos API (`50000`) to the
-  internet. Expose workloads via an ingress controller and forward only `80/443`
-  on the router.
+Treat `terraform.tfstate`, `terraform.tfvars`, and `backend.hcl` as secrets; they
+are gitignored for that reason. I don't expose the Kubernetes API (`6443`) or the
+Talos API (`50000`) to the internet — workloads go out through an ingress
+controller with only `80/443` forwarded on the router.
 
 ## License
 
-Released under the [MIT License](LICENSE). Copyright (c) 2026 vetl.
+[MIT](LICENSE). Copyright (c) 2026 vetl.
