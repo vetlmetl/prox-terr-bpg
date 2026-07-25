@@ -20,6 +20,8 @@ CLAUDE.md
 AGENTS.md
 todo.md
 
-# Cluster credentials exported from Terraform outputs
+# Cluster credentials exported from Terraform outputs (contain client certs/keys)
+kubeconfig
 kubeconfig.yaml
+talosconfig
 talosconfig.yaml
